@@ -1,7 +1,6 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys')
-const qrcode    = require('qrcode-terminal')
-const express   = require('express')
-const { Boom }  = require('@hapi/boom')
+const qrcode   = require('qrcode-terminal')
+const express  = require('express')
 
 const app  = express()
 app.use(express.json())
@@ -37,7 +36,7 @@ async function connectToWhatsApp() {
     if (connection === 'close') {
       isConnected = false
       qrCode = null
-      const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
       console.log('Conexión cerrada. Reconectando:', shouldReconnect)
       if (shouldReconnect) {
         setTimeout(connectToWhatsApp, 3000)
