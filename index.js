@@ -8,6 +8,7 @@ const API_SECRET = process.env.API_SECRET || 'tiendu-secret'
 
 let sock        = null
 let qrCode      = null
+let pairingCode = null
 let isConnected = false
 let startError  = null
 
@@ -37,6 +38,9 @@ async function connectToWhatsApp() {
       console.log('[WA] Usando versión por defecto:', version)
     }
 
+    const PHONE_NUMBER = process.env.PHONE_NUMBER // ej: 5491161073961
+    const usePairing  = !!PHONE_NUMBER && !state.creds?.registered
+
     sock = makeWASocket({
       version,
       auth:   state,
@@ -45,6 +49,19 @@ async function connectToWhatsApp() {
       connectTimeoutMs: 60000,
       retryRequestDelayMs: 2000,
     })
+
+    // Usar código de vinculación si hay número configurado
+    if (usePairing) {
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(PHONE_NUMBER)
+          pairingCode = code?.match(/.{1,4}/g)?.join('-') || code
+          console.log('[WA] 📲 CÓDIGO DE VINCULACIÓN:', pairingCode)
+        } catch (e) {
+          console.error('[WA] Error obteniendo código:', e.message)
+        }
+      }, 3000)
+    }
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update
@@ -98,7 +115,24 @@ app.get('/', (req, res) => {
 })
 
 app.get('/status', (req, res) => {
-  res.json({ connected: isConnected, hasQR: !!qrCode, error: startError })
+  res.json({ connected: isConnected, hasQR: !!qrCode, pairingCode, error: startError })
+})
+
+app.get('/code', (req, res) => {
+  if (isConnected) return res.send('<h2 style="font-family:sans-serif;color:green">✅ Ya conectado!</h2>')
+  if (!pairingCode) return res.send(`
+    <html><head><meta http-equiv="refresh" content="3"></head>
+    <body style="font-family:sans-serif;text-align:center;padding:40px">
+      <h2>⏳ Generando código...</h2><p>Esta página se recarga sola</p>
+    </body></html>`)
+  res.send(`
+    <html><head><meta http-equiv="refresh" content="60"></head>
+    <body style="font-family:sans-serif;text-align:center;padding:40px;background:#f5f5f5">
+      <h2>📱 Ingresá este código en WhatsApp Business</h2>
+      <p>WhatsApp Business → ⋮ → <b>Dispositivos vinculados</b> → <b>Vincular con número de teléfono</b></p>
+      <div style="font-size:48px;font-weight:bold;letter-spacing:8px;color:#6752E5;margin:30px 0;padding:20px;background:white;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,0.1)">${pairingCode}</div>
+      <p style="color:#888">El código dura 60 segundos. La página se recarga sola.</p>
+    </body></html>`)
 })
 
 app.get('/qr', async (req, res) => {
