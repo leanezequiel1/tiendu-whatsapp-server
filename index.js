@@ -1,9 +1,5 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys')
-const qrcode  = require('qrcode-terminal')
 const express = require('express')
-const pino    = require('pino')
-
-const app = express()
+const app     = express()
 app.use(express.json())
 
 const PORT       = process.env.PORT || 3001
@@ -12,104 +8,131 @@ const API_SECRET = process.env.API_SECRET || 'tiendu-secret'
 let sock        = null
 let qrCode      = null
 let isConnected = false
+let startError  = null
 
 // ─── Conexión WhatsApp ────────────────────────────────────────────────────────
 
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info')
-  const { version } = await fetchLatestBaileysVersion()
+  try {
+    console.log('[WA] Cargando Baileys...')
+    const baileys = require('@whiskeysockets/baileys')
+    const makeWASocket           = baileys.default
+    const useMultiFileAuthState  = baileys.useMultiFileAuthState
+    const DisconnectReason       = baileys.DisconnectReason
+    const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion
+    const qrcode = require('qrcode-terminal')
+    const pino   = require('pino')
 
-  sock = makeWASocket({
-    version,
-    auth:   state,
-    logger: pino({ level: 'silent' }),
-    browser: ['Tiendu', 'Chrome', '1.0.0'],
-  })
+    console.log('[WA] Baileys cargado. Iniciando sesión...')
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info')
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update
-
-    if (qr) {
-      qrCode = qr
-      isConnected = false
-      console.log('\n📱 Escaneá este QR con tu WhatsApp Business:\n')
-      qrcode.generate(qr, { small: true })
+    let version
+    try {
+      const res = await fetchLatestBaileysVersion()
+      version = res.version
+      console.log('[WA] Versión WA:', version)
+    } catch (e) {
+      version = [2, 3000, 1015901307]
+      console.log('[WA] Usando versión por defecto:', version)
     }
 
-    if (connection === 'close') {
-      isConnected = false
-      qrCode = null
-      const statusCode = lastDisconnect?.error?.output?.statusCode
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut
-      console.log('Conexión cerrada. Código:', statusCode, '- Reconectando:', shouldReconnect)
-      if (shouldReconnect) {
-        setTimeout(connectToWhatsApp, 3000)
+    sock = makeWASocket({
+      version,
+      auth:   state,
+      logger: pino({ level: 'silent' }),
+      browser: ['Tiendu', 'Chrome', '1.0.0'],
+      connectTimeoutMs: 60000,
+      retryRequestDelayMs: 2000,
+    })
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update
+
+      if (qr) {
+        qrCode = qr
+        isConnected = false
+        console.log('[WA] QR generado, esperando escaneo...')
+        qrcode.generate(qr, { small: true })
       }
-    }
 
-    if (connection === 'open') {
-      isConnected = true
-      qrCode = null
-      console.log('✅ WhatsApp conectado!')
-    }
-  })
+      if (connection === 'close') {
+        isConnected = false
+        qrCode = null
+        const statusCode = lastDisconnect?.error?.output?.statusCode
+        const loggedOut  = statusCode === DisconnectReason.loggedOut
+        console.log('[WA] Conexión cerrada. Código:', statusCode, '- loggedOut:', loggedOut)
+        if (!loggedOut) {
+          console.log('[WA] Reconectando en 5s...')
+          setTimeout(connectToWhatsApp, 5000)
+        }
+      }
 
-  sock.ev.on('creds.update', saveCreds)
-}
+      if (connection === 'open') {
+        isConnected = true
+        qrCode = null
+        console.log('[WA] ✅ Conectado!')
+      }
+    })
 
-// ─── Middleware auth ──────────────────────────────────────────────────────────
+    sock.ev.on('creds.update', saveCreds)
 
-function auth(req, res, next) {
-  const secret = req.headers['x-api-secret']
-  if (secret !== API_SECRET) return res.status(401).json({ error: 'No autorizado' })
-  next()
+  } catch (err) {
+    startError = err.message
+    console.error('[WA] Error al iniciar:', err)
+    setTimeout(connectToWhatsApp, 10000)
+  }
 }
 
 // ─── Rutas ────────────────────────────────────────────────────────────────────
 
-app.get('/', (req, res) => res.json({ status: 'Tiendu WhatsApp Server running ✅' }))
+function auth(req, res, next) {
+  if (req.headers['x-api-secret'] !== API_SECRET) {
+    return res.status(401).json({ error: 'No autorizado' })
+  }
+  next()
+}
+
+app.get('/', (req, res) => {
+  res.json({ status: 'Tiendu WhatsApp Server ✅', connected: isConnected, error: startError })
+})
 
 app.get('/status', (req, res) => {
-  res.json({ connected: isConnected, hasQR: !!qrCode })
+  res.json({ connected: isConnected, hasQR: !!qrCode, error: startError })
 })
 
 app.get('/qr', (req, res) => {
-  if (!qrCode) return res.json({ ok: false, message: isConnected ? 'Ya conectado' : 'Sin QR aún, esperá unos segundos' })
+  if (!qrCode) {
+    return res.json({ ok: false, message: isConnected ? 'Ya conectado' : 'QR no disponible aún, esperá unos segundos y recargá' })
+  }
   res.json({ ok: true, qr: qrCode })
 })
 
 app.post('/send', auth, async (req, res) => {
   if (!isConnected || !sock) {
-    return res.status(503).json({ error: 'WhatsApp no conectado' })
+    return res.status(503).json({ error: 'WhatsApp no conectado', hasQR: !!qrCode })
   }
-
   const { phone, message } = req.body
   if (!phone || !message) {
     return res.status(400).json({ error: 'Faltan phone o message' })
   }
-
   try {
-    // Normalizar número argentino → 549XXXXXXXXXX
     let number = phone.replace(/\D/g, '')
     if (number.startsWith('0')) number = number.slice(1)
     if (!number.startsWith('54')) number = '54' + number
-    if (number.startsWith('54') && !number.startsWith('549')) {
-      number = '549' + number.slice(2)
-    }
-
+    if (!number.startsWith('549')) number = '549' + number.slice(2)
     const jid = number + '@s.whatsapp.net'
     await sock.sendMessage(jid, { text: message })
-    console.log('✅ Mensaje enviado a', jid)
+    console.log('[WA] ✅ Mensaje enviado a', jid)
     res.json({ ok: true, to: jid })
   } catch (err) {
-    console.error('Error enviando mensaje:', err)
+    console.error('[WA] Error enviando:', err)
     res.status(500).json({ error: err.message })
   }
 })
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log('🚀 Servidor corriendo en puerto', PORT)
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Servidor en puerto ${PORT}`)
   connectToWhatsApp()
 })
